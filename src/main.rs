@@ -1,55 +1,75 @@
-use axum::{
-    routing::post,
-    Router,
-    Json,
-    extract::State,
-};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::env;
+use std::time::Duration; // 新增导入
 
-mod chat;
-mod functions;
-mod history;
+#[derive(Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
 
-use chat::{handle_chat, ChatRequest};
+#[derive(Deserialize)]
+struct ChatResponse {
+    choices: Vec<Choice>,
+}
 
-#[derive(Clone)]
-pub struct AppState {
-    kv_store: Arc<Mutex<history::KVStore>>,
-    groq_api_key: String,
-    openweathermap_api_key: String,
+#[derive(Deserialize)]
+struct Choice {
+    message: Message,
+}
+
+#[derive(Deserialize)]
+struct Message {
+    content: String,
+    reasoning_content: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
-    let app_state = AppState {
-        kv_store: Arc::new(Mutex::new(history::KVStore::new())),
-        groq_api_key: std::env::var("GROQ_API_KEY").expect("GROQ_API_KEY must be set"),
-        openweathermap_api_key: std::env::var("OPENWEATHERMAP_API_KEY")
-            .expect("OPENWEATHERMAP_API_KEY must be set"),
-    };
+    // 从环境变量获取 API Key
+    let api_key = "sk-1001361df8ad43e884bc766fb2474a8f";
 
-    let app = Router::new()
-        .route("/", post(handle_request))
-        .with_state(app_state);
+    // 使用带超时设置的 Client
+    let client = Client::builder()
+        .timeout(Duration::from_secs(40)) // 设置超时时间为 30 秒
+        .build()
+        .expect("Failed to build client");
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+
+    // 构建消息内容
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: "猫和狗谁好".to_string(),
+    }];
+
+    // 发起请求
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&serde_json::json!({
+            "model": "deepseek-v3",
+            "messages": messages,
+        }))
+        .send()
         .await
-        .unwrap();
-    println!("Server running on http://127.0.0.1:3000");
-    axum::serve(listener, app).await.unwrap();
-}
+        .expect("Failed to send request");
 
-async fn handle_request(
-    State(state): State<AppState>,
-    Json(body): Json<ChatRequest>,
-) -> Json<serde_json::Value> {
-    match handle_chat(state, body).await {
-        Ok(response) => Json(serde_json::json!({ "response": response })),
-        Err(e) => Json(serde_json::json!({
-            "response": "Something went wrong, we are working on it",
-            "error": e.to_string()
-        })),
+    // 调试：打印原始响应文本
+    let response_text = response.text().await.expect("Failed to read response text");
+    println!("Raw response: {}", response_text);
+
+    // 使用解析后的响应继续后续操作
+    let chat_response: ChatResponse = serde_json::from_str(&response_text)
+        .expect("Failed to parse response");
+
+    // 打印思考过程和最终答案
+    if let Some(reasoning) = &chat_response.choices[0].message.reasoning_content {
+        println!("思考过程：");
+        println!("{}", reasoning);
     }
-} 
+
+    println!("最终答案：");
+    println!("{}", chat_response.choices[0].message.content);
+}
